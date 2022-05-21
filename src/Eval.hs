@@ -15,6 +15,7 @@ import           Data.Function                  ( on )
 import qualified Data.IntMap.Strict            as IM
 import qualified Data.Map.Strict               as M
 import           Data.Maybe                     ( fromMaybe )
+import           Data.Time.Clock.POSIX          ( getPOSIXTime )
 import           Lexer
 import           Parser
 import           Util
@@ -24,8 +25,7 @@ newtype Compute a = Compute { unCompute :: Ex.ExceptT Exception (St.StateT Progr
     deriving newtype (Functor, Applicative, Monad, Ex.MonadIO, St.MonadState ProgramState, Ex.MonadError Exception)
 
 runCompute :: ProgramState -> Compute a -> IO (Either Exception a)
-runCompute initialState =
-    flip St.evalStateT initialState . Ex.runExceptT . unCompute
+runCompute state = flip St.evalStateT state . Ex.runExceptT . unCompute
 
 
 data ProgramState = ProgramState
@@ -35,7 +35,14 @@ data ProgramState = ProgramState
     , prgMagicNumber :: Int
     }
 
-cleanState = ProgramState GlobalEnv M.empty IM.empty 0
+initialState = ProgramState GlobalEnv vars mem 0  where
+    vars = M.fromList [("clock", -1), ("to_string", -3)]
+    mem  = IM.fromList
+        [ (-1, ValCell 1 (VFunction "clock" (-2)))
+        , (-2, FunCell 1 FClock)
+        , (-3, ValCell 1 (VFunction "to_string" (-4)))
+        , (-4, FunCell 1 FToString)
+        ]
 
 produceMagicNumber :: Compute Int
 produceMagicNumber = do
@@ -73,25 +80,34 @@ showValueType (VString _    ) = "string"
 showValueType (VNumber _    ) = "number"
 showValueType (VFunction _ _) = "function"
 
+-- used in print statements and the to_string built-in function
+showValue :: Value -> String
+showValue (VString s) = s
+showValue v           = prettyPrint v
+
 
 data Exception = RuntimeError String
                | Return Value
 
 
-data Function = Function
-    { funId       :: Int
-    , funName     :: String
-    , funClosure  :: Env
-    , funArgNames :: [AToken]
-    , funBody     :: [Statement]
-    }
+data Function
+    = Function
+        { funId       :: Int
+        , funName     :: String
+        , funClosure  :: Env
+        , funArgNames :: [AToken]
+        , funBody     :: [Statement]
+        }
+    | FClock
+    | FToString
     deriving Show
 
 instance Eq Function where
     (==) = (==) `on` funId
 
-funArgCount f@Function{} = length $ funArgNames f
-
+funArgCount Function { funArgNames = args } = length args
+funArgCount FClock                          = 0
+funArgCount FToString                       = 1
 
 data Env = GlobalEnv
          | LocalEnv Int (M.Map String Int) Env
@@ -165,6 +181,7 @@ adjustRefCount f a = do
     delete (FunCell _ fun) = delFun fun
     delete (ValCell _ val) = delVal val
     delFun Function { funClosure = c } = decrAllRefCounts c
+    delFun _                           = return ()
     delVal (VFunction _ a) = decrRefCount a
     delVal _               = return ()
     decrAllRefCounts GlobalEnv           = return ()
@@ -373,10 +390,8 @@ eval c@(ECall e args) = do
     funId    <- verify funMaybe
     fun      <- readMem funId
     checkArgCount fun args
-    args'    <- sequence $ eval <$> args
-    (a, res) <- callOuter fun args'
-    bindTmp a -- bind returned value to a temporary variable to make sure it gets garbage collected
-    return res
+    args' <- sequence $ eval <$> args
+    callOuter fun args'
   where
     verify (VFunction _ f) = return f
     verify badVal =
@@ -397,8 +412,18 @@ eval c@(ECall e args) = do
             <> show got
             <> " arguments instead of "
             <> show expected :: Compute ()
-    callOuter fun@Function { funClosure = c } args =
-        withEnv c $ withNewEnv $ callInner fun args `Ex.catchError` handleReturn
+    callOuter FClock _ = VNumber . realToFrac <$> Ex.liftIO getPOSIXTime
+    callOuter FToString (x : _) = return $ VString $ showValue x
+    callOuter FToString _ = error "to_str got no arguments somehow"
+    callOuter fun@Function { funClosure = c } args = do
+        (a, res) <-
+            withEnv c
+            $               withNewEnv
+            $               callInner fun args
+            `Ex.catchError` handleReturn
+        -- bind returned value to a temporary variable to make sure it gets garbage collected
+        bindTmp a
+        return res
     callInner fun args = do
         let argInit = zipWith
                 declareVar
@@ -430,11 +455,9 @@ exec :: Statement -> Compute ()
 exec SNop         = return ()
 
 exec (SPrint _ e) = do
-    val <- withNewEnv $ eval e -- evaluate in new end to garbage collect temporary values
+    val <- withNewEnv $ eval e -- evaluate in new env to garbage collect temporary values
     Ex.liftIO $ putStrLn $ showValue val
-  where
-    showValue (VString s) = s
-    showValue v           = prettyPrint v
+
 
 exec (SExpression e) = void $ withNewEnv $ eval e
 

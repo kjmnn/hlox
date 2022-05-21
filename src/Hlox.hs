@@ -42,7 +42,7 @@ tokensToStatements ts = toEither $ extractOutput $ parseStatements ts
 
 execStatements :: [Statement] -> IO ()
 execStatements stmts = do
-    res <- runCompute cleanState $ execMany stmts
+    res <- runCompute initialState $ execMany stmts
     printError res  where
     printError (Left (RuntimeError s)) = hPutStrLn stderr s
     printError (Left (Return _)) =

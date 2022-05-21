@@ -18,9 +18,21 @@ fun ll(val, nxt) {
 fun printll(a) {
     for (a = a; a != nil; a = a(1);) print a(0);
 }
-fun sumll(a) {
-    var res = 0;
-    for (a = a; a!= nil; a = a(1);) res = res + a(0);
+fun sumll(a, init) {
+    var res = init;
+    for (a = a; a != nil; a = a(1);) res = res + a(0);
+    return res;
+}
+fun mapll(f, a) {
+    var res = ll(nil, nil);
+    var cur = res;
+    for (a = a; a != nil; a = a(1);) {
+        cur(2)(0, f(a(0)));
+        if (a(1)) {
+            cur(2)(1, ll(nil, nil));
+            cur = cur(1);
+        }
+    }
     return res;
 }
 fun appendll(a, b) {
@@ -29,8 +41,10 @@ fun appendll(a, b) {
     a(2)(1, b);
 }
 var a = ll(1, nil);
+var t = clock();
 for (var i = 2; i <= 1000; i = i + 1;) {
-    print i;
     appendll(a, ll(i, nil));
 }
-print sumll(a);
+print clock() - t;
+print sumll(a, 0);
+print sumll(mapll(to_string, a), "");
