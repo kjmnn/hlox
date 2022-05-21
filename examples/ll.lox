@@ -1,0 +1,36 @@
+fun ll(val, nxt) {
+    fun get(key) {
+        fun set(key, x) {
+            if (key == 0)
+                val = x;
+            if (key == 1)
+                nxt = x;
+        }
+        if (key == 0)
+            return val;
+        if (key == 1)
+            return nxt;
+        if (key == 2)
+            return set;
+    }
+    return get;
+}
+fun printll(a) {
+    for (a = a; a != nil; a = a(1);) print a(0);
+}
+fun sumll(a) {
+    var res = 0;
+    for (a = a; a!= nil; a = a(1);) res = res + a(0);
+    return res;
+}
+fun appendll(a, b) {
+    while (a(1) != nil)
+        a = a(1);
+    a(2)(1, b);
+}
+var a = ll(1, nil);
+for (var i = 2; i <= 1000; i = i + 1;) {
+    print i;
+    appendll(a, ll(i, nil));
+}
+print sumll(a);
