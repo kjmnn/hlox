@@ -1,5 +1,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use record patterns" #-}
 module Eval where
 import           AST
 import           Control.Monad                  ( foldM
@@ -229,8 +231,8 @@ setMem a x = do
     extractRef (VFunction _ n) = Just n
     extractRef _               = Nothing
 
-declareVar :: String -> Value -> Compute Value
-declareVar var val = do
+declare :: String -> Maybe Value -> Compute ()
+declare var mVal = do
     state <- St.get
     let env = prgEnv state
     --Ex.liftIO $ print $ "declaring " <> var <> " in " <> show env
@@ -243,10 +245,15 @@ declareVar var val = do
     case env of
         GlobalEnv      -> St.put state' { prgGlobals = vars' }
         LocalEnv i _ p -> St.put state' { prgEnv = LocalEnv i vars' p }
-    setMem a val
+    maybe (return ()) (void . setMem a) mVal
 
-assignVar :: Int -> String -> Value -> Compute Value
-assignVar l var val = do
+declareOnly :: String -> Compute ()
+declareOnly var = declare var Nothing 
+declareAssign :: String -> Value -> Compute ()
+declareAssign var val = declare var (Just val)
+
+assign :: Int -> String -> Value -> Compute Value
+assign l var val = do
     env <- St.gets prgEnv
     a   <- go l var env
     setMem a val
@@ -368,7 +375,7 @@ eval (EIdentifier _                           ) = error
 
 eval (EAssignment (AToken l (TIdentifier var)) e) = do
     val <- eval e
-    assignVar l var val
+    assign l var val
 eval (EAssignment _ _) =
     error
         "invalid token type used in place of TIdentifier during variable assignment"
@@ -426,7 +433,7 @@ eval c@(ECall e args) = do
         return res
     callInner fun args = do
         let argInit = zipWith
-                declareVar
+                declareAssign
                 ((\(TIdentifier x) -> x) . getActualToken <$> funArgNames fun)
                 args
         sequence_ argInit
@@ -463,7 +470,7 @@ exec (SExpression e) = void $ withNewEnv $ eval e
 
 exec (SVarDeclaration _ (AToken l (TIdentifier var)) e) = do
     val <- withNewEnv $ eval e
-    void $ declareVar var val
+    void $ declareAssign var val
 exec (SVarDeclaration _ _ _) =
     error
         "invalid token type used in place of TIdentifier during variable declaration"
@@ -481,10 +488,11 @@ exec (SWhile _ e stmt) = withNewEnv loop  where
 
 exec (SFunDeclaration _ (AToken _ (TIdentifier name)) args body) = do
     num     <- produceMagicNumber
+    declareOnly name 
     closure <- St.gets prgEnv
-    incrAllRefCounts closure
     setMem num $ Function num name closure args body
-    void $ declareVar name (VFunction name num)
+    assign undefined name (VFunction name num)
+    incrAllRefCounts closure
   where
     incrAllRefCounts GlobalEnv           = return ()
     incrAllRefCounts (LocalEnv _ vars p) = do
