@@ -38,12 +38,14 @@ data ProgramState = ProgramState
     }
 
 initialState = ProgramState GlobalEnv vars mem 0  where
-    vars = M.fromList [("clock", -1), ("to_string", -3)]
+    vars = M.fromList [("clock", -1), ("to_string", -3), ("new_obj", -5)]
     mem  = IM.fromList
         [ (-1, ValCell 1 (VFunction "clock" (-2)))
         , (-2, FunCell 1 FClock)
         , (-3, ValCell 1 (VFunction "to_string" (-4)))
         , (-4, FunCell 1 FToString)
+        , (-5, ValCell 1 (VFunction "new_obj" (-6)))
+        , (-6, FunCell 1 FNewObject)
         ]
 
 produceMagicNumber :: Compute Int
@@ -59,6 +61,7 @@ data Value = VBool Bool
            | VString String
            | VNumber Double
            | VFunction String Int
+           | VObject String Int
            deriving (Eq, Show)
 
 instance PrettyPrint Value where
@@ -67,7 +70,8 @@ instance PrettyPrint Value where
     prettyPrint VNil            = "nil"
     prettyPrint (VString s    ) = show s
     prettyPrint (VNumber n    ) = show n
-    prettyPrint (VFunction s _) = "<function " <> s <> ">"
+    prettyPrint (VFunction s i) = "<function " <> s <> ": " <> show i <> ">"
+    prettyPrint (VObject   s i) = "<object " <> s <> ": " <> show i <> ">"
 
 isTruthy :: Value -> Bool
 isTruthy (VBool False) = False
@@ -81,6 +85,7 @@ showValueType VNil            = "nil"
 showValueType (VString _    ) = "string"
 showValueType (VNumber _    ) = "number"
 showValueType (VFunction _ _) = "function"
+showValueType (VObject   _ _) = "object"
 
 -- used in print statements and the to_string built-in function
 showValue :: Value -> String
@@ -102,39 +107,55 @@ data Function
         }
     | FClock
     | FToString
+    | FNewObject
     deriving Show
 
-instance Eq Function where
-    (==) = (==) `on` funId
 
 funArgCount Function { funArgNames = args } = length args
 funArgCount FClock                          = 0
 funArgCount FToString                       = 1
+funArgCount FNewObject                      = 1
+
+
+data Object = Object
+    { objId      :: Int
+    , objClsName :: String
+    , objClosure :: Env
+    }
+    deriving Show
+
 
 data Env = GlobalEnv
+         | NilEnv
          | LocalEnv Int (M.Map String Int) Env
          deriving Show
 
 envId GlobalEnv        = -1
+envId NilEnv           = -2
 envId (LocalEnv i _ _) = i
 
 envParent GlobalEnv        = error "global env has no parent"
+envParent NilEnv           = error "NilEnv has no parent either"
 envParent (LocalEnv _ _ p) = p
 
 getEnvVars :: Env -> Compute (M.Map String Int)
 -- this has to be a monadic function because of how Lox handles globals
 getEnvVars GlobalEnv           = St.gets prgGlobals
+getEnvVars NilEnv              = return M.empty
 getEnvVars (LocalEnv _ vars _) = return vars
 
 
 data MemCell = ValCell Int Value
              | FunCell Int Function
-    deriving (Eq, Show)
+             | ObjCell Int Object
+    deriving Show
 
 memRefCount (ValCell rc _) = rc
 memRefCount (FunCell rc _) = rc
+memRefCount (ObjCell rc _) = rc
 memSetRefCount rc (ValCell _ val) = ValCell rc val
 memSetRefCount rc (FunCell _ fun) = FunCell rc fun
+memSetRefCount rc (ObjCell _ obj) = ObjCell rc obj
 
 -- TODO: rename this class to something saner
 class Memable a where
@@ -157,6 +178,10 @@ instance Memable Function where
     fromMemMaybe (FunCell _ fun) = Just fun
     fromMemMaybe _               = Nothing
 
+instance Memable Object where
+    toMem = ObjCell 0
+    fromMemMaybe (ObjCell _ obj) = Just obj
+    fromMemMaybe _               = Nothing
 
 incrRefCount :: Int -> Compute ()
 incrRefCount = adjustRefCount (+ 1)
@@ -180,13 +205,17 @@ adjustRefCount f a = do
         let mem' = prgMem state'
         St.put state' { prgMem = IM.delete a mem' }
   where
+    delete (ObjCell _ obj) = delObj obj
     delete (FunCell _ fun) = delFun fun
     delete (ValCell _ val) = delVal val
+    delObj Object { objClosure = c } = decrAllRefCounts c
     delFun Function { funClosure = c } = decrAllRefCounts c
     delFun _                           = return ()
     delVal (VFunction _ a) = decrRefCount a
+    delVal (VObject   _ a) = decrRefCount a
     delVal _               = return ()
     decrAllRefCounts GlobalEnv           = return ()
+    decrAllRefCounts NilEnv              = return ()
     decrAllRefCounts (LocalEnv _ vars p) = do
         sequence_ $ decrRefCount <$> M.elems vars
         decrAllRefCounts p
@@ -212,6 +241,7 @@ readVar l var = do
     go l var GlobalEnv = do
         globals <- St.gets prgGlobals
         maybe (notInScope l var) readMem (M.lookup var globals) --`Ex.catchError` (\e -> do env <- St.gets prgEnv; Ex.liftIO $ print env;Ex.throwError e)
+    go l var NilEnv = notInScope l var
     go l var (LocalEnv _ vars p) =
         maybe (go l var p) readMem (M.lookup var vars)
 
@@ -237,18 +267,17 @@ declare var mVal = do
     let env = prgEnv state
     --Ex.liftIO $ print $ "declaring " <> var <> " in " <> show env
     vars <- getEnvVars env
-    a    <- case env of
-        GlobalEnv      -> maybe produceMagicNumber return $ M.lookup var vars
-        LocalEnv _ _ _ -> produceMagicNumber  -- repeated declaration only allowed in global scope => no need to check
+    a    <- maybe produceMagicNumber return $ M.lookup var vars
     let vars' = M.insert var a vars
     state' <- St.get
     case env of
         GlobalEnv      -> St.put state' { prgGlobals = vars' }
+        NilEnv         -> error "cannot declare variables in NilEnv"
         LocalEnv i _ p -> St.put state' { prgEnv = LocalEnv i vars' p }
     maybe (return ()) (void . setMem a) mVal
 
 declareOnly :: String -> Compute ()
-declareOnly var = declare var Nothing 
+declareOnly var = declare var Nothing
 declareAssign :: String -> Value -> Compute ()
 declareAssign var val = declare var (Just val)
 
@@ -261,6 +290,7 @@ assign l var val = do
     go l var GlobalEnv = do
         state <- St.get
         maybe (notInScope l var) return $ M.lookup var (prgGlobals state)
+    go l var NilEnv = notInScope l var
     go l var (LocalEnv _ vars p) =
         maybe (go l var p) return $ M.lookup var vars
 
@@ -279,6 +309,7 @@ withNewEnv action = do
     return res
   where
     decrLocalRefCounts GlobalEnv = error "can't exit global scope anyway"
+    decrLocalRefCounts NilEnv = error "why are we exiting NilEnv"
     decrLocalRefCounts (LocalEnv _ vars _) = sequence_ $ decrRefCount <$> vars
 
 withEnv :: Env -> Compute a -> Compute a
@@ -373,12 +404,28 @@ eval (EIdentifier (AToken l (TIdentifier var))) = readVar l var
 eval (EIdentifier _                           ) = error
     "invalid token type used in place of TIdentifier during variable access"
 
-eval (EAssignment (AToken l (TIdentifier var)) e) = do
+eval (EAssignment (EIdentifier (AToken l (TIdentifier var))) e) = do
     val <- eval e
     assign l var val
+eval (EAssignment (EProperty objExpr (AToken l (TIdentifier prop))) e) = do
+    (clsName, addr) <- eval objExpr >>= extract
+    val             <- eval e
+    obj             <- readMem addr
+    closure'        <- withEnv (objClosure obj) $ do
+        declareAssign prop val
+        St.gets prgEnv
+    setMem addr obj { objClosure = closure' }
+    return val
+  where
+    extract :: Value -> Compute (String, Int)
+    extract (VObject s a) = return (s, a)
+    extract badVal =
+        Ex.throwError
+            $  RuntimeError
+            $  "Cannot access property on value of type "
+            <> showValueType badVal
 eval (EAssignment _ _) =
-    error
-        "invalid token type used in place of TIdentifier during variable assignment"
+    error "invalid assignment target (not caught during static analysis?)"
 
 eval (ELogical operandA operator operandB) = do
     valA <- eval operandA
@@ -420,8 +467,20 @@ eval c@(ECall e args) = do
             <> " arguments instead of "
             <> show expected :: Compute ()
     callOuter FClock _ = VNumber . realToFrac <$> Ex.liftIO getPOSIXTime
-    callOuter FToString (x : _) = return $ VString $ showValue x
-    callOuter FToString _ = error "to_str got no arguments somehow"
+    callOuter FToString  (x : _) = return $ VString $ showValue x
+    callOuter FToString  _       = error "to_str got no arguments somehow"
+    callOuter FNewObject (x : _) = case x of
+        VString s -> do
+            num  <- produceMagicNumber
+            num2 <- produceMagicNumber
+            setMem num2 $ Object num2 s (LocalEnv num M.empty NilEnv)
+            return $ VObject s num2
+        badVal ->
+            Ex.throwError
+                $  RuntimeError
+                $  "Function new_obj expected a  string, got "
+                <> showValueType badVal
+    callOuter FNewObject _ = error "new_obj got no arguments somehow"
     callOuter fun@Function { funClosure = c } args = do
         (a, res) <-
             withEnv c
@@ -454,8 +513,22 @@ eval c@(ECall e args) = do
         let vars' = M.insert ('#' : show a) a vars
         case env of
             GlobalEnv      -> St.put state { prgGlobals = vars' }
+            NilEnv         -> error "NilEnv should never be the current env"
             LocalEnv i _ p -> St.put state { prgEnv = LocalEnv i vars' p }
+eval (EProperty objExpr (AToken l (TIdentifier prop))) = do
+    (clsName, addr)                 <- eval objExpr >>= extract
+    Object { objClosure = closure } <- readMem addr
+    withEnv closure $ readVar l prop
+  where
+    extract :: Value -> Compute (String, Int)
+    extract (VObject s a) = return (s, a)
+    extract badVal =
+        Ex.throwError
+            $  RuntimeError
+            $  "Cannot access property on value of type "
+            <> showValueType badVal
 
+eval (EProperty _ _) = error "another wrong token error"
 
 exec :: Statement -> Compute ()
 
@@ -487,14 +560,15 @@ exec (SWhile _ e stmt) = withNewEnv loop  where
         when (isTruthy val) $ exec stmt >> loop
 
 exec (SFunDeclaration _ (AToken _ (TIdentifier name)) args body) = do
-    num     <- produceMagicNumber
-    declareOnly name 
+    num <- produceMagicNumber
+    declareOnly name
     closure <- St.gets prgEnv
     setMem num $ Function num name closure args body
     assign undefined name (VFunction name num)
     incrAllRefCounts closure
   where
     incrAllRefCounts GlobalEnv           = return ()
+    incrAllRefCounts NilEnv              = return ()
     incrAllRefCounts (LocalEnv _ vars p) = do
         sequence_ $ incrRefCount <$> M.elems vars
         incrAllRefCounts p
@@ -505,6 +579,6 @@ exec SFunDeclaration{} =
 exec (SReturn _ e) = do
     val <- eval e
     Ex.throwError $ Return val
-
+exec _ = undefined
 execMany :: [Statement] -> Compute ()
 execMany stmts = sequence_ $ exec <$> stmts

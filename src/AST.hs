@@ -1,4 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use record patterns" #-}
 module AST
     ( Expression(..)
     , Statement(..)
@@ -30,6 +32,7 @@ data Statement = SNop
                | SWhile Int Expression Statement
                | SFunDeclaration Int AToken [AToken] [Statement]
                | SReturn Int Expression
+               | SClsDeclaration Int AToken [Statement]
                deriving (Eq, Show)
 
 getStmtLine :: Statement -> Int
@@ -42,15 +45,17 @@ getStmtLine (SIfElse l _ _ _        ) = l
 getStmtLine (SWhile l _ _           ) = l
 getStmtLine (SFunDeclaration l _ _ _) = l
 getStmtLine (SReturn l _            ) = l
+getStmtLine (SClsDeclaration l _ _  ) = l
 
 data Expression = ELiteral AToken
                 | EUnary AToken Expression
                 | EBinary Expression AToken Expression
                 | EGrouping Int Expression
                 | EIdentifier AToken
-                | EAssignment AToken Expression
+                | EAssignment Expression Expression
                 | ELogical Expression AToken Expression
                 | ECall Expression [Expression]
+                | EProperty Expression AToken
                 deriving (Eq, Show)
 
 getExprLine :: Expression -> Int
@@ -59,29 +64,32 @@ getExprLine (EUnary op _    ) = getTokenLine op
 getExprLine (EBinary e _ _  ) = getExprLine e
 getExprLine (EGrouping l _  ) = l
 getExprLine (EIdentifier i  ) = getTokenLine i
-getExprLine (EAssignment i _) = getTokenLine i
+getExprLine (EAssignment e _) = getExprLine e
 getExprLine (ELogical e _ _ ) = getExprLine e
 getExprLine (ECall e _      ) = getExprLine e
+getExprLine (EProperty  e _      ) = getExprLine e
 
 instance PrettyPrint Expression where
     prettyPrint (ELiteral t) = prettyPrint t
     prettyPrint (EUnary t e) =
-        "(" ++ prettyPrint t ++ " " ++ prettyPrint e ++ ")"
+        "(" <> prettyPrint t <> " " <> prettyPrint e <> ")"
     prettyPrint (EBinary e1 t e2) =
         "("
-            ++ prettyPrint t
-            ++ " "
-            ++ prettyPrint e1
-            ++ " "
-            ++ prettyPrint e2
-            ++ ")"
-    prettyPrint (EGrouping _ e) = "(group " ++ prettyPrint e ++ ")"
+            <> prettyPrint t
+            <> " "
+            <> prettyPrint e1
+            <> " "
+            <> prettyPrint e2
+            <> ")"
+    prettyPrint (EGrouping _ e) = "(group " <> prettyPrint e <> ")"
     prettyPrint (EIdentifier t) = prettyPrint t
     prettyPrint (EAssignment t e) =
-        "(= " ++ prettyPrint t ++ " " ++ prettyPrint e ++ ")"
+        "(= " <> prettyPrint t <> " " <> prettyPrint e <> ")"
     prettyPrint (ELogical e1 t e2) = prettyPrint (EBinary e1 t e2)
-    -- TODO: look up how calls are prettyprinted
-    prettyPrint (ECall _ _       ) = "(some kind of call idk)"
+    prettyPrint (ECall e es) =
+        "(" <> prettyPrint e <> " " <> unwords (prettyPrint <$> es) <> ")"
+    prettyPrint (EProperty e t) =
+        "(." <> prettyPrint t <> " " <> prettyPrint e <> ")"
     --prettyPrint _ = "MY SPOON IS TOO BIG"
 
 singleT p = single (p . getActualToken)
@@ -149,7 +157,11 @@ topStatement = failOn TEof $ sync declaration  where
 
 declaration :: Parser String [AToken] Statement
 declaration =
-    varDeclaration <* expectSemicolon <|> funDeclaration <|> statement
+    varDeclaration
+        <*  expectSemicolon
+        <|> funDeclaration
+        <|> clsDeclaration
+        <|> statement
 
 varDeclaration :: Parser String [AToken] Statement
 varDeclaration =
@@ -181,13 +193,22 @@ funDeclaration =
                (many $ singleT' TComma *> singleT isIdentifier)
             <|> pure []
 
+clsDeclaration :: Parser String [AToken] Statement
+clsDeclaration =
+    SClsDeclaration
+        <$> (getTokenLine <$> singleT' TClass)
+        <*> singleT isIdentifier
+        <*  singleT' TLeftBrace
+        <*> many funDeclaration
+        <*  singleT' TRightBrace
+
 statement :: Parser String [AToken] Statement
 statement =
     blockStmt
         <|> whileStmt
         <|> forStmt
-        <|> ifStmt
         <|> ifElseStmt
+        <|> ifStmt
         --TODO: think about Nop and semicolons
         <|> nop
         <|> (printStmt <|> returnStmt <|> expressionStmt)
@@ -254,16 +275,16 @@ expression = assignment
 
 assignment =
     EAssignment
-        <$> check (equality <* singleT' TEqual)
+        <$> call <* singleT' TEqual
         <*> assignment
-        <|> logicalOr  where
+        <|> logicalOr  {-where
     check (Parser f) = Parser $ \x -> case f x of
         Fail                      -> Fail
         Error   e               i -> Error e i
         Success (EIdentifier t) i -> Success t i
         Success e               i -> Error
             (show (getTokenLine (head x)) <> ": Invalid assignment target")
-            i
+            i-}
 logicalOr = binaryR ELogical logicalAnd (singleT' TOr)
 
 logicalAnd = binaryR ELogical equality (singleT' TAnd)
@@ -282,16 +303,20 @@ factor = binaryL EBinary unary operator
 unary = EUnary <$> operator <*> unary <|> call
     where operator = oneOfT [TBang, TMinus]
 
-call = process <$> primary <*> many argList  where
+call = process <$> primary <*> many (Left <$> argList <|> Right <$> property)  where
     argList = singleT' TLeftParen *> args <* singleT' TRightParen
     args =
         liftA2 (:)
                (failOn TRightParen expression)
                (many $ failOn TRightParen $ singleT' TComma *> expression)
             <|> pure []
-    process :: Expression -> [[Expression]] -> Expression
+    property = singleT' TDot *> singleT isIdentifier
+    process :: Expression -> [Either [Expression] AToken] -> Expression
     process e [] = e
-    process e cs = foldl ECall e cs
+    process e cs = foldl go e cs
+    go e (Left as) = ECall e as
+    go e (Right p) = EProperty e p
+
 
 primary = grouping <|> literal <|> identifier <|> astParseError ""
 

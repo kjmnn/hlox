@@ -1,0 +1,54 @@
+class LL {
+    fun init(val, nxt) {
+        this.val = val;
+        this.nxt = nxt;
+    }
+    fun to_string() {
+        return "[" + this.to_string_internal() + "]";
+    }
+    fun to_string_internal() {
+        var item = to_string(this.val);
+        if(this.nxt) 
+            return item + ", " + this.nxt.to_string_internal();
+        else
+            return item;
+    }
+    fun map(f) {
+        this.val = f(this.val);
+        if(this.nxt) 
+            this.nxt.map(f);
+        return this;
+    }
+    fun clone() {
+        if(this.nxt)
+            return LL(this.val, this.nxt.clone());
+        else
+            return LL(this.val, nil);
+    }
+    fun append(x) {
+        if(this.nxt)
+            this.nxt.append(x);
+        else
+            this.nxt = x;
+        return this;
+    }
+    fun reduce(f, acc) {
+        if(this.nxt)
+            return this.nxt.reduce(f, f(acc, this.val));
+        else
+            return f(acc, this.val);
+    }
+}
+
+fun add(a, b) {
+    return a + b;
+}
+
+var a = LL(1, nil);
+var t = clock();
+for(var i = 2; i <= 1000; i = i + 1;) {
+    a.append(LL(i, nil));
+}
+print clock() - t;
+print a.reduce(add, 0);
+print a.to_string();

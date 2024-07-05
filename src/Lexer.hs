@@ -49,7 +49,7 @@ data Token
     | TPrint
     | TReturn
     | TSuper
-    | TThis
+    -- | TThis
     | TTrue
     | TVar
     | TWhile
@@ -105,9 +105,9 @@ instance PrettyPrint Token where
     prettyPrint TVar            = "var"
     prettyPrint TWhile          = "while"
     prettyPrint TEof            = error "TEof should be handled separately"
-    prettyPrint _ =
-        error
-            "You are trying to prettyprint a debug symbol, which should never make it out of the scanner?"
+    prettyPrint other =
+        error $
+            "You are trying to prettyprint a debug symbol (" <> show other <> ") , which should never make it out of the scanner?"
 
 -- allows for more helpful error reporting later
 data AToken = AToken
@@ -206,7 +206,7 @@ anyToken = asum
     , TPrint <$ keyword "print"
     , TReturn <$ keyword "return"
     , TSuper <$ keyword "super"
-    , TThis <$ keyword "this"
+    -- , TThis <$ keyword "this"
     , TTrue <$ keyword "true"
     , TVar <$ keyword "var"
     , TWhile <$ keyword "while"
